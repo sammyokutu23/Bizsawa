@@ -1,4 +1,5 @@
 import '../polyfills'
+import '../lib/pwa'
 import { useEffect, useState } from 'react'
 import { View, StatusBar, Platform } from 'react-native'
 import { Stack } from 'expo-router'
