@@ -1,5 +1,6 @@
 import { secureStorage } from './secureStorage'
 import AsyncStorage from '@react-native-async-storage/async-storage'
+import bcrypt from 'bcryptjs'
 
 // Lazy-load expo-crypto so missing native module (Expo Go / dev-client without rebuild) doesn't crash.
 // Falls back to WebCrypto subtle or pure-JS SHA256 — offline 7-day grace still works.
@@ -10,6 +11,39 @@ try {
   Crypto = mod?.default ?? mod
 } catch {
   Crypto = null
+}
+
+// bcryptjs needs a CSPRNG for salts: WebCrypto on web, expo-crypto on Hermes.
+if (Crypto?.getRandomBytes) {
+  bcrypt.setRandomFallback((len: number) =>
+    Array.from(Crypto.getRandomBytes(len) as Uint8Array),
+  )
+}
+
+// Offline secrets are salted bcrypt, not bare SHA-256: on web they fall back
+// to localStorage (no Keychain), where a fast unsalted hash is trivially
+// brute-forced. Async hash/compare yield to the event loop, so no JS freeze.
+const BCRYPT_ROUNDS = 10
+const LEGACY_SHA256 = /^[0-9a-f]{64}$/
+
+const hashSecret = (secret: string) => bcrypt.hash(secret, BCRYPT_ROUNDS)
+
+// Returns whether `secret` matches `stored`, and whether `stored` is a legacy
+// SHA-256 digest the caller should re-save as bcrypt.
+async function verifySecret(
+  secret: string,
+  legacyInput: string,
+  stored: string,
+): Promise<{ ok: boolean; upgrade: boolean }> {
+  if (LEGACY_SHA256.test(stored)) {
+    const ok = (await digestSHA256(legacyInput)) === stored
+    return { ok, upgrade: ok }
+  }
+  try {
+    return { ok: await bcrypt.compare(secret, stored), upgrade: false }
+  } catch {
+    return { ok: false, upgrade: false }
+  }
 }
 
 async function digestSHA256(input: string): Promise<string> {
@@ -35,7 +69,8 @@ async function digestSHA256(input: string): Promise<string> {
   // Pure-JS deterministic fallback — keeps offline login working without native
   // DJB2 expanded to 64 hex chars (consistent, not cryptographically strong but offline-only)
   let h = 5381
-  for (let i = 0; i < input.length; i++) h = ((h << 5) + h + input.charCodeAt(i)) | 0
+  for (let i = 0; i < input.length; i++)
+    h = ((h << 5) + h + input.charCodeAt(i)) | 0
   const hex = (h >>> 0).toString(16).padStart(8, '0')
   return (hex + hex + hex + hex + hex + hex + hex + hex).slice(0, 64)
 }
@@ -51,11 +86,10 @@ interface OfflineCredential {
   createdAt: number
 }
 
-async function hashPassword(password: string, email: string): Promise<string> {
-  // SHA256(email+":"+password) — deterministic for offline compare; uses native if present, else fallback
-  const input = `${email.toLowerCase().trim()}:${password}`
-  return digestSHA256(input)
-}
+// Pre-bcrypt credentials stored SHA256(email+":"+password); kept only to
+// verify and upgrade them in place.
+const legacyPasswordInput = (password: string, email: string) =>
+  `${email.toLowerCase().trim()}:${password}`
 
 export async function cacheOfflineCredential(
   email: string,
@@ -63,7 +97,7 @@ export async function cacheOfflineCredential(
   userId: string,
   businessId?: string | null,
 ) {
-  const hash = await hashPassword(password, email)
+  const hash = await hashSecret(password)
   const now = Date.now()
   const cred: OfflineCredential = {
     email: email.toLowerCase().trim(),
@@ -95,8 +129,21 @@ export async function verifyOfflineCredential(
   try {
     const cred: OfflineCredential = JSON.parse(raw)
     if (Date.now() > cred.offlineGraceUntil) return null
-    const hash = await hashPassword(password, email)
-    if (hash !== cred.hash) return null
+    const { ok, upgrade } = await verifySecret(
+      password,
+      legacyPasswordInput(password, email),
+      cred.hash,
+    )
+    if (!ok) return null
+    if (upgrade) {
+      // Keep the original grace window; only the hash format changes.
+      const upgraded = { ...cred, hash: await hashSecret(password) }
+      await secureStorage.setSecure(
+        secureStorage.SECURE_KEYS.offlineCred(email),
+        JSON.stringify(upgraded),
+      )
+      return upgraded
+    }
     return cred
   } catch {
     return null
@@ -139,7 +186,7 @@ export async function getOfflineGraceDaysLeft(email: string): Promise<number> {
 
 // PIN + Biometric helpers
 export async function setOfflinePin(pin: string) {
-  const hash = await digestSHA256(pin)
+  const hash = await hashSecret(pin)
   await secureStorage.setSecure(secureStorage.SECURE_KEYS.pinHash, hash)
 }
 
@@ -148,8 +195,9 @@ export async function verifyOfflinePin(pin: string): Promise<boolean> {
     secureStorage.SECURE_KEYS.pinHash,
   )
   if (!stored) return false
-  const hash = await digestSHA256(pin)
-  return hash === stored
+  const { ok, upgrade } = await verifySecret(pin, pin, stored)
+  if (upgrade) await setOfflinePin(pin)
+  return ok
 }
 
 export async function setBiometricEnabled(enabled: boolean) {
