@@ -56,6 +56,19 @@ type Dependencies struct {
 	Sync      *sync.Module
 }
 
+// corsOptions must list every custom header the clients send: a browser
+// preflight that asks for an unlisted header (e.g. X-Device-Id from the
+// Expo web build's sync client) is refused, and the request never leaves.
+func corsOptions(allowedOrigins []string) cors.Options {
+	return cors.Options{
+		AllowedOrigins:   allowedOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Idempotency-Key", "X-Request-ID", "X-Business-ID", "X-Device-Id"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}
+}
+
 func NewRouter(deps Dependencies) http.Handler {
 	r := chi.NewRouter()
 
@@ -66,13 +79,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Use(chimiddleware.RealIP)
 	r.Use(chimiddleware.Recoverer)
 	r.Use(chimiddleware.Timeout(60 * time.Second))
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   deps.Config.CORS.AllowedOrigins,
-		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Idempotency-Key", "X-Request-ID", "X-Business-ID"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
+	r.Use(cors.Handler(corsOptions(deps.Config.CORS.AllowedOrigins)))
 	r.Use(middleware.TenantResolution)
 	r.Use(middleware.Idempotency)
 
