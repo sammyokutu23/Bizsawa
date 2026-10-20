@@ -9,6 +9,7 @@ import {
   Modal,
   TextInput,
   Pressable,
+  Platform,
 } from 'react-native'
 import { useLocalSearchParams, router } from 'expo-router'
 import {
@@ -40,6 +41,7 @@ import { toNumber } from '../../lib/api-dtos'
 import { useBusinessContext } from '../../contexts/BusinessContext'
 import { Button } from '../../components/ui/Button'
 import { buildInvoiceHtml, invoiceShareText } from '../../lib/invoicePdf'
+import { printHtmlDocument } from '../../lib/printHtml'
 import * as Print from 'expo-print'
 import * as Sharing from 'expo-sharing'
 // SDK 54: expo-file-system ~19.0.24 moved classic APIs to /legacy
@@ -271,7 +273,8 @@ export default function InvoiceDetail() {
     try {
       setIsPrinting(true)
       const html = buildPdfHtml()
-      await Print.printAsync({ html })
+      if (Platform.OS === 'web') await printHtmlDocument(html)
+      else await Print.printAsync({ html })
     } catch (e: any) {
       Alert.alert('Print failed', e?.message || 'Could not print')
     } finally { setIsPrinting(false) }
@@ -281,6 +284,11 @@ export default function InvoiceDetail() {
     try {
       setIsDownloading(true)
       const html = buildPdfHtml()
+      if (Platform.OS === 'web') {
+        // No file system on web: the print dialog's "Save as PDF" is the download.
+        await printHtmlDocument(html)
+        return
+      }
       const { uri } = await Print.printToFileAsync({ html })
       // SDK 54: expo-file-system ~19.0.24 uses documentDirectory + moveAsync
       const safeName = (invoice.invoiceNumber || 'invoice').replace(/[^a-zA-Z0-9-_]/g, '_')
@@ -311,8 +319,6 @@ export default function InvoiceDetail() {
 
   const handleShareWhatsAppNative = async () => {
     try {
-      const html = buildPdfHtml()
-      const { uri } = await Print.printToFileAsync({ html })
       const text = invoiceShareText({
         invoiceNumber: invoice.invoiceNumber,
         status: invoice.status,
@@ -330,13 +336,20 @@ export default function InvoiceDetail() {
         lines: [],
         business: { name: activeBusiness?.name || 'Business Shop', phone: activeBusiness?.phone, email: activeBusiness?.email, address: activeBusiness?.address, taxPin: (activeBusiness as any)?.taxPin },
       })
+      const caption = text + `\n\n*Amount due: KES ${toNumber((invoice as any).amountDue).toLocaleString('en-KE')}*`
+      if (Platform.OS === 'web') {
+        // No share sheet or PDF file on web: open WhatsApp (web or desktop app) with the caption.
+        window.open(`https://wa.me/?text=${encodeURIComponent(caption)}`, '_blank', 'noopener')
+        return
+      }
+      const { uri } = await Print.printToFileAsync({ html: buildPdfHtml() })
       // Try to share file via system sheet — user can pick WhatsApp
       if (await Sharing.isAvailableAsync()) {
         // Share file first; if user picks WhatsApp it attaches
         await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: 'Share via WhatsApp', UTI: 'com.adobe.pdf' })
       }
       // Also offer to open WhatsApp with text
-      const encoded = encodeURIComponent(text + `\n\n*Amount due: KES ${toNumber((invoice as any).amountDue).toLocaleString('en-KE')}*`)
+      const encoded = encodeURIComponent(caption)
       const waUrl = `whatsapp://send?text=${encoded}`
       const can = await Linking.canOpenURL(waUrl)
       if (can) {

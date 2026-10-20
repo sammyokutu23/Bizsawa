@@ -24,6 +24,10 @@ function hexToRgba(hex, alpha) {
 module.exports = {
   content: ['./app/**/*.{js,jsx,ts,tsx}', './components/**/*.{js,jsx,ts,tsx}'],
   presets: [require('nativewind/preset')],
+  // The app is light-only (app.json userInterfaceStyle). With the default
+  // 'media', NativeWind's web runtime throws "Cannot manually set color
+  // scheme" when its late-injected darkMode flag triggers colorScheme.set().
+  darkMode: 'class',
   theme: {
     extend: {
       colors: {
